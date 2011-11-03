@@ -129,10 +129,23 @@ static inline int rt_policy(int policy)
 	return 0;
 }
 
+static inline int dl_policy(int policy)
+{
+        if (unlikely(policy == SCHED_DEADLINE))
+                return 1;
+        return 0;
+}
+
 static inline int task_has_rt_policy(struct task_struct *p)
 {
 	return rt_policy(p->policy);
 }
+
+static inline int task_has_dl_policy(struct task_struct *p)
+{
+        return dl_policy(p->policy);
+}
+
 
 /*
  * This is the priority-queue data structure of the RT scheduling class:
@@ -5393,6 +5406,15 @@ int sched_setscheduler(struct task_struct *p, int policy,
 }
 EXPORT_SYMBOL_GPL(sched_setscheduler);
 
+int sched_setscheduler_ex(struct task_struct *p, int policy,
+                          const struct sched_param *param,
+                          const struct sched_param_ex *param_ex)
+{
+        //return __sched_setscheduler(p, policy, param, param_ex, true);
+        return 5;
+}
+EXPORT_SYMBOL_GPL(sched_setscheduler_ex);
+
 /**
  * sched_setscheduler_nocheck - change the scheduling policy and/or RT priority of a thread from kernelspace.
  * @p: the task in question.
@@ -5446,6 +5468,77 @@ SYSCALL_DEFINE3(sched_setscheduler, pid_t, pid, int, policy,
 		return -EINVAL;
 
 	return do_sched_setscheduler(pid, policy, param);
+}
+
+/*
+ * Notice that, to extend sched_param_ex in the future without causing ABI
+ * issues, the user-space is asked to pass to this (and the other *_ex())
+ * function(s) the actual size of the data structure it has been compiled
+ * against.
+ *
+ * What we do is the following:
+ *  - if the user data structure is bigger than our one we fail, since this
+ *    means we wouldn't be able of providing some of the features that
+ *    are expected;
+ *  - if the user data structure is smaller than our one we can continue,
+ *    we just initialize to default all the fielld of the kernel-side
+ *    sched_param_ex and copy from the user the available values. This
+ *    obviously assume that such data structure can only grow and that
+ *    positions and meaning of the existing fields will not be altered.
+ *
+ * The issue can be addressed also adding a "version" field to the data
+ * structure itself (which would also remove the fixed position & meaning
+ * requirement)... Comments about the best way to go are welcome!
+ */
+
+
+static int
+do_sched_setscheduler_ex(pid_t pid, int policy, unsigned len,
+                         struct sched_param_ex __user *param_ex)
+{
+        struct sched_param lparam;
+        struct sched_param_ex lparam_ex;
+        struct task_struct *p;
+        int retval;
+
+        if (!param_ex || pid < 0)
+                return -EINVAL;
+        if (len > sizeof(lparam_ex))
+                return -EINVAL;
+
+        memset(&lparam_ex, 0, sizeof(lparam_ex));
+        if (copy_from_user(&lparam_ex, param_ex, len))
+                return -EFAULT;
+
+        rcu_read_lock();
+        retval = -ESRCH;
+        p = find_process_by_pid(pid);
+        if (p != NULL) {
+                if (dl_policy(policy))
+                        lparam.sched_priority = 0;
+                else
+                        lparam.sched_priority = lparam_ex.sched_priority;
+                retval = sched_setscheduler_ex(p, policy, &lparam, &lparam_ex);
+        }
+        rcu_read_unlock();
+
+        return retval;
+}
+
+
+/**
+ * sys_sched_setscheduler_ex - same as above, but with extended sched_param
+ * @pid: the pid in question.
+ * @policy: new policy (could use extended sched_param).
+ * @len: size of data pointed by param_ex.
+ * @param: structure containg the extended parameters.
+ */
+SYSCALL_DEFINE4(sched_setscheduler_ex, pid_t, pid, int, policy,
+                unsigned, len, struct sched_param_ex __user *, param_ex)
+{
+        if (policy < 0)
+                return -EINVAL;
+        return do_sched_setscheduler_ex(pid, policy, len, param_ex);
 }
 
 /**

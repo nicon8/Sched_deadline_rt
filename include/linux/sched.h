@@ -39,6 +39,7 @@
 #define SCHED_BATCH		3
 /* SCHED_ISO: reserved but not implemented yet */
 #define SCHED_IDLE		5
+#define SCHED_DEADLINE		6
 /* Can be ORed in to make sure the process is reverted back to SCHED_NORMAL on fork */
 #define SCHED_RESET_ON_FORK     0x40000000
 
@@ -94,6 +95,82 @@ struct sched_param {
 #include <linux/hardirq.h>
 
 #include <asm/processor.h>
+
+
+/*
+ * Extended scheduling parameters data structure.
+ *
+ * This is needed because the original struct sched_param can not be
+ * altered without introducing ABI issues with legacy applications
+ * (e.g., in sched_getparam()).
+ *
+ * However, the possibility of specifying more than just a priority for
+ * the tasks may be useful for a wide variety of application fields, e.g.,
+ * multimedia, streaming, automation and control, and many others.
+ *
+ * This variant (sched_param_ex) is meant at describing a so-called
+ * sporadic time-constrained task. In such model a task is specified by:
+ *  - the activation period or minimum instance inter-arrival time;
+ *  - the maximum (or average, depending on the actual scheduling
+ *    discipline) computation time of all instances, a.k.a. runtime;
+ *  - the deadline (relative to the actual activation time) of each
+ *    instance.
+ * Very briefly, a periodic (sporadic) task asks for the execution of
+ * some specific computation --which is typically called an instance--
+ * (at most) every period. Moreover, each instance typically lasts no more
+ * than the runtime and must be completed by time instant t equal to
+ * the instance activation time + the deadline.
+ *
+ * This is reflected by the actual fields of the sched_param_ex structure:
+ *
+ *  @sched_priority     task's priority (might still be useful)
+ *  @sched_deadline     representative of the task's deadline
+ *  @sched_runtime      representative of the task's runtime
+ *  @sched_period       representative of the task's period
+ *  @sched_flags        for customizing the scheduler behaviour
+ *
+ * There are other fields, which may be useful for implementing (in
+ * user-space) advanced scheduling behaviours, e.g., feedback scheduling:
+ *
+ *  @curr_runtime       task's currently available runtime
+ *  @used_runtime       task's totally used runtime
+ *  @curr_deadline      task's current absolute deadline
+ *
+ * Given this task model, there are a multiplicity of scheduling algorithms
+ * and policies, that can be used to ensure all the tasks will make their
+ * timing constraints.
+ *
+ * As of now, the SCHED_DEADLINE policy (sched_dl scheduling class) is the
+ * only user of this new interface. More information about the algorithm
+ * available in the scheduling class file or in Documentation/.
+ */
+struct sched_param_ex {
+	int sched_priority;
+	struct timespec sched_runtime;
+	struct timespec sched_deadline;
+	struct timespec sched_period;
+	unsigned int sched_flags;
+
+	struct timespec curr_runtime;
+	struct timespec used_runtime;
+	struct timespec curr_deadline;
+};
+
+/*
+ * Scheduler flags.
+ *
+ * These flags here below are meant to be used by userspace tasks to affect
+ * the scheduler behaviour and/or specifying that they want to be informed
+ * of the occurrence of some events.
+ *
+ *  @SF_SIG_RORUN       tells us the task wants to be notified whenever
+ *                      a runtime overrun occurs;
+ *  @SF_SIG_DMISS       tells us the task wants to be notified whenever
+ *                      a scheduling deadline is missed.
+ */
+#define SF_SIG_RORUN	2
+#define SF_SIG_DMISS	4
+
 
 struct exec_domain;
 struct futex_pi_state;
@@ -2103,6 +2180,9 @@ extern int sched_setscheduler(struct task_struct *, int,
 			      const struct sched_param *);
 extern int sched_setscheduler_nocheck(struct task_struct *, int,
 				      const struct sched_param *);
+extern int sched_setscheduler_ex(struct task_struct *, int,
+                                 const struct sched_param *,
+                                 const struct sched_param_ex *);
 extern struct task_struct *idle_task(int cpu);
 extern struct task_struct *curr_task(int cpu);
 extern void set_curr_task(int cpu, struct task_struct *p);

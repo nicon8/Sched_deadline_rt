@@ -352,10 +352,11 @@
 #define __NR_syncfs             344
 #define __NR_sendmmsg		345
 #define __NR_setns		346
+#define __NR_sched_setscheduler_ex      347
 
 #ifdef __KERNEL__
 
-#define NR_syscalls 347
+#define NR_syscalls 348
 
 #define __ARCH_WANT_IPC_PARSE_VERSION
 #define __ARCH_WANT_OLD_READDIR
