@@ -159,6 +159,14 @@ struct sched_param_ex {
 /*
  * Scheduler flags.
  *
+ *
+ * @SF_HEAD    tells us that the task has to be considered one of the
+ *             maximum priority tasks in the system. This means it
+ *             always enqueued with maximum priority in the runqueue
+ *             of the highest priority scheduling class. In case it
+ *             it sched_deadline, the task also ignore runtime and
+ *             bandwidth limitations.
+ *
  * These flags here below are meant to be used by userspace tasks to affect
  * the scheduler behaviour and/or specifying that they want to be informed
  * of the occurrence of some events.
@@ -167,9 +175,26 @@ struct sched_param_ex {
  *                      a runtime overrun occurs;
  *  @SF_SIG_DMISS       tells us the task wants to be notified whenever
  *                      a scheduling deadline is missed.
+ *  @SF_BWRECL_DL       tells us that the task doesn't stop when exhausting
+ *                      its runtime, and it remains a -deadline task, even
+ *                      though its deadline is postponed. This means it
+ *                      won't affect the scheduling of the other -deadline
+ *                      tasks, but if it is a CPU-hog, lower scheduling
+ *                      classes will starve!
+ *  @SF_BWRECL_RT       tells us that the task doesn't stop when exhausting
+ *                      its runtime, and it becomes a -rt task, with the
+ *                      priority specified in the sched_priority field of
+ *                      struct shced_param_ex.
+ *  @SF_BWRECL_OTH      tells us that the task doesn't stop when exhausting
+ *                      its runtime, and it becomes a normal task, with
+ *                      default priority.
  */
+#define SF_HEAD         1
 #define SF_SIG_RORUN	2
 #define SF_SIG_DMISS	4
+#define SF_BWRECL_DL    8
+#define SF_BWRECL_RT    16
+#define SF_BWRECL_NR    32
 
 
 struct exec_domain;
@@ -1159,6 +1184,7 @@ struct sched_domain;
 #else
 #define ENQUEUE_WAKING		0
 #endif
+#define ENQUEUE_REPLENISH	8
 
 #define DEQUEUE_SLEEP		1
 
@@ -1169,7 +1195,8 @@ struct sched_class {
 	void (*dequeue_task) (struct rq *rq, struct task_struct *p, int flags);
 	void (*yield_task) (struct rq *rq);
 	bool (*yield_to_task) (struct rq *rq, struct task_struct *p, bool preempt);
-
+	long (*wait_interval) (struct task_struct *p, struct timespec *rqtp,
+                               struct timespec __user *rmtp);
 	void (*check_preempt_curr) (struct rq *rq, struct task_struct *p, int flags);
 
 	struct task_struct * (*pick_next_task) (struct rq *rq);
@@ -1193,6 +1220,7 @@ struct sched_class {
 	void (*set_curr_task) (struct rq *rq);
 	void (*task_tick) (struct rq *rq, struct task_struct *p, int queued);
 	void (*task_fork) (struct task_struct *p);
+	void (*task_dead) (struct task_struct *p);
 
 	void (*switched_from) (struct rq *this_rq, struct task_struct *task);
 	void (*switched_to) (struct rq *this_rq, struct task_struct *task);
@@ -1289,6 +1317,63 @@ struct sched_rt_entity {
 #endif
 };
 
+struct sched_stats_dl {
+	int			dmiss, rorun;
+	u64			last_dmiss;
+	u64			last_rorun;
+#ifdef CONFIG_SCHEDSTATS
+	u64			dmiss_max;
+	u64			rorun_max;
+#endif
+	u64                     tot_rtime;
+};
+
+struct sched_dl_entity {
+	struct rb_node	rb_node;
+	int nr_cpus_allowed;
+
+	/*
+	 * Original scheduling parameters. Copied here from sched_param_ex
+	 * during sched_setscheduler_ex(), they will remain the same until
+	 * the next sched_setscheduler_ex().
+	 */
+	u64 dl_runtime;		/* maximum runtime for each instance 	*/
+	u64 dl_deadline;	/* relative deadline of each instance	*/
+	u64 dl_period;		/* separation of two instances (period) */
+	u64 dl_bw;		/* dl_runtime / dl_deadline		*/
+
+	/*
+	 * Actual scheduling parameters. Initialized with the values above,
+	 * they are continously updated during task execution. Note that
+	 * the remaining runtime could be < 0 in case we are in overrun.
+	 */
+	s64 runtime;		/* remaining runtime for this instance	*/
+	u64 deadline;		/* absolute deadline for this instance	*/
+	unsigned int flags;	/* specifying the scheduler behaviour   */
+
+	/*
+	 * Some bool flags:
+	 *
+	 * @dl_throttled tells if we exhausted the runtime. If so, the
+	 * task has to wait for a replenishment to be performed at the
+	 * next firing of dl_timer.
+	 *
+	 * @dl_new tells if a new instance arrived. If so we must
+	 * start executing it with full runtime and reset its absolute
+	 * deadline;
+	 */
+	int dl_throttled, dl_new;
+
+	/*
+	 * Bandwidth enforcement timer. Each -deadline task has its
+	 * own bandwidth to be enforced, thus we need one timer per task.
+	 */
+	struct hrtimer dl_timer;
+
+	struct sched_stats_dl stats;
+};
+
+
 struct rcu_node;
 
 enum perf_event_task_context {
@@ -1317,6 +1402,7 @@ struct task_struct {
 	const struct sched_class *sched_class;
 	struct sched_entity se;
 	struct sched_rt_entity rt;
+	struct sched_dl_entity dl;
 
 #ifdef CONFIG_PREEMPT_NOTIFIERS
 	/* list of struct preempt_notifier: */
@@ -1364,6 +1450,7 @@ struct task_struct {
 	struct list_head tasks;
 #ifdef CONFIG_SMP
 	struct plist_node pushable_tasks;
+	struct rb_node pushable_dl_tasks;
 #endif
 
 	struct mm_struct *mm, *active_mm;
@@ -1515,6 +1602,8 @@ struct task_struct {
 	struct plist_head pi_waiters;
 	/* Deadlock detection and priority inheritance handling */
 	struct rt_mutex_waiter *pi_blocked_on;
+        /* */
+        struct task_struct *pi_top_task;
 #endif
 
 #ifdef CONFIG_DEBUG_MUTEXES
@@ -1700,6 +1789,10 @@ static inline bool pagefault_disabled(void)
  * user-space.  This allows kernel threads to set their
  * priority to a value higher than any user task. Note:
  * MAX_RT_PRIO must not be smaller than MAX_USER_RT_PRIO.
+ *
+ * SCHED_DEADLINE tasks has negative priorities, reflecting
+ * the fact that any of them has higher prio than RT and
+ * NORMAL/BATCH tasks.
  */
 
 #define MAX_USER_RT_PRIO	100
@@ -1708,12 +1801,37 @@ static inline bool pagefault_disabled(void)
 #define MAX_PRIO		(MAX_RT_PRIO + 40)
 #define DEFAULT_PRIO		(MAX_RT_PRIO + 20)
 
+#define MAX_DL_PRIO             0
+
 static inline int rt_prio(int prio)
 {
 	if (unlikely(prio < MAX_RT_PRIO))
 		return 1;
 	return 0;
 }
+
+static inline int dl_prio(int prio)
+{
+        if (unlikely(prio < MAX_DL_PRIO))
+                return 1;
+        return 0;
+}
+
+static inline int dl_task(struct task_struct *p)
+{
+        return dl_prio(p->prio);
+}
+
+/*
+ * We might have temporarily dropped -deadline policy,
+ * but still be a -deadline task!
+ */
+
+static inline int __dl_task(struct task_struct *p)
+{
+        return dl_task(p) || p->policy == SCHED_DEADLINE;
+}
+
 
 static inline int rt_task(struct task_struct *p)
 {
@@ -2126,6 +2244,14 @@ extern int sysctl_sched_rt_runtime;
 int sched_rt_handler(struct ctl_table *table, int write,
 		void __user *buffer, size_t *lenp,
 		loff_t *ppos);
+
+extern unsigned int sysctl_sched_dl_period;
+extern int sysctl_sched_dl_runtime;
+
+int sched_dl_handler(struct ctl_table *table, int write,
+                void __user *buffer, size_t *lenp,
+                loff_t *ppos);
+
 
 #ifdef CONFIG_SCHED_AUTOGROUP
 extern unsigned int sysctl_sched_autogroup_enabled;

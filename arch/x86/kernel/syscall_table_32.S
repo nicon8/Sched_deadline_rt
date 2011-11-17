@@ -347,3 +347,5 @@ ENTRY(sys_call_table)
 	.long sys_sendmmsg		/* 345 */
 	.long sys_setns
         .long sys_sched_setscheduler_ex
+        .long sys_sched_setparam_ex
+        .long sys_sched_getparam_ex
