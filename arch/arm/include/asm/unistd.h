@@ -402,6 +402,10 @@
 #define __NR_syncfs			(__NR_SYSCALL_BASE+373)
 #define __NR_sendmmsg			(__NR_SYSCALL_BASE+374)
 #define __NR_setns			(__NR_SYSCALL_BASE+375)
+#define __NR_sched_setscheduler_ex	(__NR_SYSCALL_BASE+376)
+#define __NR_sched_setparam_ex		(__NR_SYSCALL_BASE+377)
+#define __NR_sched_getparam_ex		(__NR_SYSCALL_BASE+378)
+#define __NR_sched_wait_interval	(__NR_SYSCALL_BASE+379)
 
 /*
  * The following SWIs are ARM private.
